@@ -25,9 +25,21 @@ object Module {
     // module de-duplication in FIRRTL emission.
     val childSourceInfo = UnlocatableSourceInfo
 
+    if (Builder.readyForModuleConstr) {
+      throwException("Error: Called Module() twice without instantiating a Module." +
+                     sourceInfo.makeMessage(" See " + _))
+    }
+    Builder.readyForModuleConstr = true
     val parent: Option[Module] = Builder.currentModule
-    val m = bc.setRefs() // This will set currentModule!
+
+    val m = bc.setRefs() // This will set currentModule and unset readyForModuleConstr!!!
     m._commands.prepend(DefInvalid(childSourceInfo, m.io.ref)) // init module outputs
+
+    if (Builder.readyForModuleConstr) {
+      throwException("Error: attempted to instantiate a Module, but nothing happened. " +
+                     "This is probably due to rewrapping a Module instance with Module()." +
+                     sourceInfo.makeMessage(" See " + _))
+    }
     Builder.currentModule = parent // Back to parent!
     val ports = m.computePorts
     val component = Component(m, m.name, ports, m._commands)
@@ -93,6 +105,10 @@ extends HasId {
   private[chisel3] val _commands = ArrayBuffer[Command]()
   private[core] val _ids = ArrayBuffer[HasId]()
   Builder.currentModule = Some(this)
+  if (!Builder.readyForModuleConstr) {
+    throwException("Error: attempted to instantiate a Module without wrapping it in Module().")
+  }
+  readyForModuleConstr = false
 
   /** Desired name of this module. */
   def desiredName = this.getClass.getName.split('.').last
@@ -162,15 +178,6 @@ extends HasId {
       port.setRef(ModuleIO(this, _namespace.name(name)))
     }
 
-    // Suggest names to nodes using runtime reflection
-    def getValNames(c: Class[_]): Set[String] = {
-      if (c == classOf[Module]) Set()
-      else getValNames(c.getSuperclass) ++ c.getDeclaredFields.map(_.getName)
-    }
-    val valNames = getValNames(this.getClass)
-    def isPublicVal(m: java.lang.reflect.Method) =
-      m.getParameterTypes.isEmpty && valNames.contains(m.getName)
-
     /** Recursively suggests names to supported "container" classes
       * Arbitrary nestings of supported classes are allowed so long as the
       * innermost element is of type HasId
@@ -189,8 +196,7 @@ extends HasId {
           }
         case _ => // Do nothing
       }
-    val methods = getClass.getMethods.sortWith(_.getName > _.getName)
-    for (m <- methods if isPublicVal(m)) {
+    for (m <- getPublicFields(classOf[Module])) {
       nameRecursively(m.getName, m.invoke(this))
     }
 
@@ -201,7 +207,7 @@ extends HasId {
     }
 
     // All suggestions are in, force names to every node.
-    _ids.foreach(_.forceName(default="T", _namespace))
+    _ids.foreach(_.forceName(default="_T", _namespace))
     _ids.foreach(_._onModuleClose)
     this
   }
